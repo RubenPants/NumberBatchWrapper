@@ -10,13 +10,16 @@ HERE = pathlib.Path(__file__).parent
 README = (HERE / "README.md").read_text()
 
 INSTALL_REQUIRES = [
+    "numpy~=1.20.1",
+    "fold-to-ascii~=1.0.2.post1",
+    "tqdm~=4.59.0",
 ]
 
 # noinspection SpellCheckingInspection
 setup(
         name="number_batch_wrapper",
         version="0.1.0",
-        description="Wrapper around the ConceptNet Number Batch library to improve performance.",
+        description="Wrapper around the ConceptNet Number Batch library to improve inference performance.",
         long_description=README,
         long_description_content_type="text/markdown",
         url="https://github.com/RubenPants/NumberBatchWrapper",
