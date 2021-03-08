@@ -1,6 +1,7 @@
 """ConceptNet Number Batch class."""
 import re
 from functools import lru_cache
+from glob import glob
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -32,9 +33,10 @@ class Wrapper:
             language: str,
             path: Path,
             en_fallback: bool = True,
+            normalise: bool = True,
             clean_f: Callable[..., str] = clean,
+            tokenizer: Callable[..., str] = lambda x: x.split(),
             level: int = 3,
-            parallel: bool = True,
     ) -> None:
         """
         Initialise the NumberBatch wrapper.
@@ -42,15 +44,18 @@ class Wrapper:
         :param language: Language to encode
         :param path: Path to where NumberBatch files are stored
         :param en_fallback: Whether or not to fallback on the English encodings (requires en-initialisation to work)
+        :param normalise: Normalise the resulting embeddings
         :param clean_f: Cleaning function used before lookup
+        :param tokenizer: Function to split sentence into words (split on whitespace by default)
         :param level: File-depth
-        :param parallel: Encode in parallel or not
         """
+        assert level > 0
         self.lang = language
         self.path = path
-        self.en_fallback = en_fallback
+        self.en_fallback = en_fallback and language != 'en'
+        self.normalise = normalise
         self.clean_f = clean_f
-        self.parallel = parallel
+        self.tokenizer = tokenizer
         self._level = level  # Don't change after init
         self._initialised = self._is_initialised()
     
@@ -62,28 +67,51 @@ class Wrapper:
         """Representation of the ConceptNetNumberBatch class."""
         return str(self)
     
-    @lru_cache(maxsize=1024)
     def __call__(self, sentences: List[str]) -> np.ndarray:
         """Embed the provided word."""
         if not self._initialised:
             raise NotInitialisedException("Wrapper hasn't been initialised before, please run initialise() first")
         
-        # TODO: Continue
-        #
-        # if lang is not None:
-        #     lang = lang.lower()
-        #     assert lang in self._LANG
-        #
-        # # Pre-process the word
-        # if len(word.split()) != 1:
-        #     raise Exception(f"Only a single word should be given, not '{word}'")
-        # word = fold(word.lower())
-        #
-        # vector = self.get_vector(word, lang=lang)
-        # while vector is None:
-        #     word = word[:-1]
-        #     vector = self.get_vector(word, lang=lang)
-        # return vector
+        result = []
+        for sentence in tqdm(sentences, desc="Embedding"):
+            result.append(self.embed(sentence))
+        return np.vstack(result)
+    
+    def embed(self, sentence: str) -> np.ndarray:
+        """Embed a single sentence."""
+        words = self.tokenizer(sentence)
+        
+        # Embed the sequence of words
+        result = np.zeros((self.SIZE,))
+        for word in words:
+            try:
+                v = self.get_vector(word=word, lang=self.lang)
+                if v is None and self.en_fallback:
+                    v = self.get_vector(word=word, lang=self.lang)
+                if v is not None: result += v  # If v is None; ignore
+            except EncodingException:
+                pass  # Silently ignore missing results
+        
+        # Normalise the result if requested
+        norm = result.sum()
+        if self.normalise and norm != 0: result /= norm
+        return result
+    
+    @lru_cache(maxsize=1024)
+    def get_vector(self, word: str, lang: str) -> Optional[np.ndarray]:
+        """Get the vector of the word stored in the list found under the given path."""
+        word = self.clean_f(word)
+        try:
+            with open(self.path / f"_nb_{lang}/{word[:self._level]}", 'r') as f:
+                line = f.readline()
+                while line:
+                    split = line.split()
+                    if word == split[0]:
+                        return np.asarray(split[1:], dtype=float)
+                    line = f.readline()
+        except (FileNotFoundError, IsADirectoryError):
+            raise EncodingException(f"Unable to embed '{word}'")
+        return None
     
     def initialise(
             self,
@@ -127,6 +155,7 @@ class Wrapper:
                     remove_symbols=remove_symbols,
                     remove_numbers=remove_numbers,
             )
+        self._initialised = True
     
     def _initialise_lang(
             self,
@@ -159,10 +188,10 @@ class Wrapper:
             
             # Valid name, return cleaned name together with corresponding vector
             return self.clean_f(name), [float(x) for x in line.split()[1:]]
-
+        
         # Extract all data related to this language
         data = {}
-        pbar = tqdm(total=9161912, desc=f"Extracting {lang}..")  # 9161912 hardcoded to improver reading-speed
+        pbar = tqdm(total=9161912, desc=f"Extracting '{lang}'..")  # 9161912 hardcoded to improver reading-speed
         try:
             with open(raw_path, 'r') as f:
                 line = f.readline()
@@ -170,81 +199,35 @@ class Wrapper:
                     pbar.update()
                     if f'/c/{lang}/' == line[:6]:
                         k, v = split_clean(line)
-                        if k:
-                            data[k] = v
+                        if k: data[k] = v
                     line = f.readline()
         finally:
             pbar.close()
-            
+        
         # Segment the data
-        # TODO
-        #  - Perform with self._level: name[:self._level] == file_name
-        print(len(data))
+        with tqdm(desc=f"Segmenting '{lang}'.."):
+            files = {}
+            for word in data.keys():
+                tag = word[:self._level]
+                if tag not in files: files[tag] = set()
+                files[tag].add(word)
+            
+            def process(word: str, vector: List[float]) -> str:
+                """Turn word and vector couple to string."""
+                return f"{word} {' '.join([str(v) for v in vector])}"
+            
+            path = self.path / f"_nb_{lang}"
+            path.mkdir(exist_ok=True, parents=True)
+            for tag, words in files.items():
+                with open(path / tag, 'w') as f:
+                    f.write('\n'.join([process(word, data[word]) for word in words]))
     
     def _is_initialised(self) -> bool:
         """Check if the wrapper has been initialised before."""
-        return False  # TODO: Check
-    
-    def get_vector(self, word: str, lang: Optional[str] = None) -> Optional[np.ndarray]:
-        """Get the vector of the word stored in the list found under the given path."""
-        key = word[:2] if len(word) >= 2 else word[0] * 2
-        
-        # Try to fetch the word embedding in the original language first
-        vector = search_word_emb(word, self._path[lang] / f'{key}.txt') if lang is not None else None
-        
-        # If nothing found, check other languages (since may be a name)
-        if vector is None and lang != 'en':
-            vector = search_word_emb(word, self._path['en'] / f'{key}.txt')
-        if vector is None and lang != 'fr':
-            vector = search_word_emb(word, self._path['fr'] / f'{key}.txt')
-        if vector is None and lang != 'nl':
-            vector = search_word_emb(word, self._path['nl'] / f'{key}.txt')
-        return vector
-    
-    def add_vector(self, word: str, vector: np.ndarray, languages: Optional[Tuple[str]] = None) -> None:
-        """Add a word with corresponding vector to the specified languages."""
-        languages = languages if languages else self._LANG
-        key = word[:2] if len(word) >= 2 else word[0] * 2
-        for lang in languages:
-            add_word_emb(word=word, emb=vector, path=self._path[lang] / f'{key}.txt')
+        if not glob(str(self.path / f"_nb_{self.lang}/*")): return False
+        if self.en_fallback and not glob(str(self.path / f"_nb_en/*")): return False
+        return True
     
     def print_overview(self) -> None:
         """Print overview of the class."""
         pass  # TODO
-
-
-# def search_word_emb(word: str, path: Path) -> Optional[np.ndarray]:
-#     """Search for the word embedding in the file specified by the path."""
-#     try:
-#         with open(str(path), 'r') as f:
-#             line = f.readline()
-#             while line:
-#                 split = line[:-1].split()
-#                 if word == split[0]:
-#                     return np.asarray(split[1:], dtype=float)
-#                 line = f.readline()
-#     except FileNotFoundError:
-#         raise ConceptNetException(f"Unable to embed '{word}'")
-#     return None
-#
-#
-# def add_word_emb(word: str, emb: np.ndarray, path: Path) -> None:
-#     """Add a new embedding to the data."""
-#     newline = ' '.join([word, ] + [str(e) for e in emb]) + '\n'
-#     with open(str(path), 'r') as f:
-#         lines = f.readlines()
-#
-#     # Replace existing if word already in corpus
-#     added = False
-#     for i, line in enumerate(lines):
-#         if line.split()[0] == word:
-#             lines[i] = newline
-#             added = True
-#             break
-#
-#     # Add new line if not yet in corpus
-#     if not added:
-#         lines.append(newline)
-#
-#     with open(str(path), 'w') as f:
-#         f.write(''.join(sorted(lines)))
