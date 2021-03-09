@@ -1,5 +1,6 @@
 """Utilisation methods."""
 import gzip
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Optional, Set
@@ -10,8 +11,10 @@ from tqdm import tqdm
 
 
 def clean(x: str) -> str:
-    """Default cleaning method, which lowercases the text and folds to ASCII."""
-    return fold(x.lower())
+    """Default cleaning method, put text to lowercase, remove non-letters and folds to ASCII."""
+    x = fold(x.lower())
+    x = re.sub(r'[^a-z]', '', x)
+    return x
 
 
 def get_raw_nb_path(

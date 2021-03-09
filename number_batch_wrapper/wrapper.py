@@ -57,7 +57,6 @@ class Wrapper:
         self.clean_f = clean_f
         self.tokenizer = tokenizer
         self._level = level  # Don't change after init
-        self._initialised = self._is_initialised()
     
     def __str__(self) -> str:
         """Representation of the ConceptNetNumberBatch class."""
@@ -69,7 +68,7 @@ class Wrapper:
     
     def __call__(self, sentences: List[str]) -> np.ndarray:
         """Embed the provided word."""
-        if not self._initialised:
+        if not self.is_initialised():
             raise NotInitialisedException("Wrapper hasn't been initialised before, please run initialise() first")
         
         result = []
@@ -79,39 +78,23 @@ class Wrapper:
     
     def embed(self, sentence: str) -> np.ndarray:
         """Embed a single sentence."""
-        words = self.tokenizer(sentence)
+        words = [self.clean_f(w) for w in self.tokenizer(sentence)]
         
         # Embed the sequence of words
         result = np.zeros((self.SIZE,))
         for word in words:
-            try:
-                v = self.get_vector(word=word, lang=self.lang)
-                if v is None and self.en_fallback:
-                    v = self.get_vector(word=word, lang=self.lang)
-                if v is not None: result += v  # If v is None; ignore
-            except EncodingException:
-                pass  # Silently ignore missing results
+            v = _read_file(
+                    word=word,
+                    file=self.path / f"_nb_{self.lang}/{word[:self._level]}",
+                    alternative_file=self.path / f"_nb_en/{word[:self._level]}" if self.en_fallback else None,
+            )
+            if v is not None: result += v  # If v is None; ignore
         
         # Normalise the result if requested
         norm = result.sum()
-        if self.normalise and norm != 0: result /= norm
+        if not norm: raise EncodingException(f"No encoding found for sentence '{sentence}'")
+        if self.normalise: result /= norm
         return result
-    
-    @lru_cache(maxsize=1024)
-    def get_vector(self, word: str, lang: str) -> Optional[np.ndarray]:
-        """Get the vector of the word stored in the list found under the given path."""
-        word = self.clean_f(word)
-        try:
-            with open(self.path / f"_nb_{lang}/{word[:self._level]}", 'r') as f:
-                line = f.readline()
-                while line:
-                    split = line.split()
-                    if word == split[0]:
-                        return np.asarray(split[1:], dtype=float)
-                    line = f.readline()
-        except (FileNotFoundError, IsADirectoryError):
-            raise EncodingException(f"Unable to embed '{word}'")
-        return None
     
     def initialise(
             self,
@@ -155,7 +138,6 @@ class Wrapper:
                     remove_symbols=remove_symbols,
                     remove_numbers=remove_numbers,
             )
-        self._initialised = True
     
     def _initialise_lang(
             self,
@@ -222,12 +204,53 @@ class Wrapper:
                 with open(path / tag, 'w') as f:
                     f.write('\n'.join([process(word, data[word]) for word in words]))
     
-    def _is_initialised(self) -> bool:
+    def is_initialised(self) -> bool:
         """Check if the wrapper has been initialised before."""
         if not glob(str(self.path / f"_nb_{self.lang}/*")): return False
         if self.en_fallback and not glob(str(self.path / f"_nb_en/*")): return False
         return True
+
+
+@lru_cache(maxsize=1024)
+def _read_file(
+        word: str,
+        file: Path,
+        alternative_file: Optional[Path] = None,
+) -> Optional[np.ndarray]:
+    """
+    Read in the vector associated with the provided word.
     
-    def print_overview(self) -> None:
-        """Print overview of the class."""
-        pass  # TODO
+    :param word: The word to look for
+    :param file: The file to search over for the word
+    :param alternative_file: Alternative file (e.g. in other language) to search over for the word
+    """
+    # Lookup the word
+    if file.is_file():
+        with open(file, 'r') as f:
+            line = f.readline()
+            while line:
+                split = line.split()
+                if word == split[0]:
+                    return np.asarray(split[1:], dtype=float)
+                line = f.readline()
+                
+    # Not found in requested language, check if available in English
+    if alternative_file and alternative_file.is_file():
+        with open(alternative_file, 'r') as f:
+            line = f.readline()
+            while line:
+                split = line.split()
+                if word == split[0]:
+                    return np.asarray(split[1:], dtype=float)
+                line = f.readline()
+                
+    # If still nothing found, prune the word's tail and try again
+    if len(word) > 1:
+        return _read_file(
+                word=word[:-1],
+                file=file,
+                alternative_file=alternative_file,
+        )
+    
+    # Still nothing found, return None
+    return None
