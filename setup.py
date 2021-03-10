@@ -11,7 +11,6 @@ README = (HERE / "README.md").read_text()
 
 INSTALL_REQUIRES = [
     "numpy~=1.20.1",
-    "fold-to-ascii~=1.0.2.post1",
     "tqdm~=4.59.0",
 ]
 

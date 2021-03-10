@@ -1,5 +1,6 @@
 """ConceptNet Number Batch class."""
 import re
+import shutil
 from functools import lru_cache
 from glob import glob
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 from tqdm import tqdm
 
-from number_batch_wrapper.utils import clean, get_numbers, get_raw_nb_path, get_special_tokens, get_symbols
+from number_batch_wrapper.utils import get_numbers, get_raw_nb_path, get_special_tokens, get_symbols
 
 
 class EncodingException(Exception):
@@ -34,9 +35,9 @@ class Wrapper:
             path: Path,
             en_fallback: bool = True,
             normalise: bool = True,
-            clean_f: Callable[..., str] = clean,
+            clean_f: Callable[..., str] = lambda x: x,
             tokenizer: Callable[..., str] = lambda x: x.split(),
-            level: int = 3,
+            level: int = 5,
     ) -> None:
         """
         Initialise the NumberBatch wrapper.
@@ -47,7 +48,7 @@ class Wrapper:
         :param normalise: Normalise the resulting embeddings
         :param clean_f: Cleaning function used before lookup
         :param tokenizer: Function to split sentence into words (split on whitespace by default)
-        :param level: File-depth
+        :param level: File-segmentation depth
         """
         assert level > 0
         self.lang = language
@@ -83,11 +84,7 @@ class Wrapper:
         # Embed the sequence of words
         result = np.zeros((self.SIZE,))
         for word in words:
-            v = _read_file(
-                    word=word,
-                    file=self.path / f"_nb_{self.lang}/{word[:self._level]}",
-                    alternative_file=self.path / f"_nb_en/{word[:self._level]}" if self.en_fallback else None,
-            )
+            v = self.embed_word(word)
             if v is not None: result += v  # If v is None; ignore
         
         # Normalise the result if requested
@@ -96,10 +93,19 @@ class Wrapper:
         if self.normalise: result /= norm
         return result
     
+    def embed_word(self, word: str) -> Optional[np.ndarray]:
+        """Embed a single word."""
+        return _read_file(
+                word=word,
+                file=self.path / f"_nb_{self.lang}/{word[:self._level]}",
+                alternative_file=self.path / f"_nb_en/{word[:self._level]}" if self.en_fallback else None,
+        )
+    
     def initialise(
             self,
             inp_path: Path,
             version: str = "19.08",
+            clean_target: bool = True,
             letters_only: bool = True,
             remove_special_tokens: bool = True,
             remove_symbols: bool = True,
@@ -110,6 +116,7 @@ class Wrapper:
         
         :param inp_path: Folder where raw NumberBatch data is stored, or will be stored once downloaded
         :param version: NumberBatch version to use
+        :param clean_target: Whether or not to clean the target folder (specified under self.path) first
         :param letters_only: Only consider words strictly consisting of letters
         :param remove_special_tokens: Remove words containing special tokens
         :param remove_symbols: Remove words containing symbols
@@ -123,6 +130,7 @@ class Wrapper:
         # Initialise
         self._initialise_lang(
                 lang=self.lang,
+                clean_target=clean_target,
                 raw_path=raw_path,
                 letters_only=letters_only,
                 remove_special_tokens=remove_special_tokens,
@@ -132,6 +140,7 @@ class Wrapper:
         if self.en_fallback and self.lang != 'en':
             self._initialise_lang(
                     lang='en',
+                    clean_target=clean_target,
                     raw_path=raw_path,
                     letters_only=letters_only,
                     remove_special_tokens=remove_special_tokens,
@@ -142,6 +151,7 @@ class Wrapper:
     def _initialise_lang(
             self,
             lang: str,
+            clean_target: bool,
             raw_path: Path,
             letters_only: bool,
             remove_special_tokens: bool,
@@ -198,7 +208,9 @@ class Wrapper:
                 """Turn word and vector couple to string."""
                 return f"{word} {' '.join([str(v) for v in vector])}"
             
+            # Clean the target folder first, if requested
             path = self.path / f"_nb_{lang}"
+            if clean_target and path.is_dir(): shutil.rmtree(path)
             path.mkdir(exist_ok=True, parents=True)
             for tag, words in files.items():
                 with open(path / tag, 'w') as f:
@@ -233,7 +245,7 @@ def _read_file(
                 if word == split[0]:
                     return np.asarray(split[1:], dtype=float)
                 line = f.readline()
-                
+    
     # Not found in requested language, check if available in English
     if alternative_file and alternative_file.is_file():
         with open(alternative_file, 'r') as f:
@@ -243,7 +255,7 @@ def _read_file(
                 if word == split[0]:
                     return np.asarray(split[1:], dtype=float)
                 line = f.readline()
-                
+    
     # If still nothing found, prune the word's tail and try again
     if len(word) > 1:
         return _read_file(
